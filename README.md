@@ -1,18 +1,20 @@
 # 风瞳（Fengtong）
 
+演示视频：(https://live.csdn.net/v/540311?spm=1001.2014.3001.5501)
+
 风瞳是一个面向新闻内容发布与风险审核的全栈项目。用户可注册登录、发布新闻、由 Dify 工作流辅助创作和审核，并使用搜索、地图、积分、礼品商城、秒杀和订单能力。管理端可审核新闻、管理礼品与秒杀活动、查看统计信息。
 
 本仓库可直接开源：真实环境变量、支付宝私钥和历史配置备份均不随源码提交。请勿把自己的 `.env`、PEM 私钥或云服务密钥加入 Git。
 
 ## 技术栈
 
-| 层级 | 技术 |
-| --- | --- |
-| 前端 | Vue 3、TypeScript、Vite、Pinia、Vue Router、Axios、ECharts、TinyMCE |
-| 后端 | Python 3.11、FastAPI、SQLAlchemy、Pydantic、JWT、bcrypt |
-| 数据与中间件 | MySQL 8、Redis 7、Elasticsearch 8、RabbitMQ 3 |
-| 部署 | Docker Compose、Nginx |
-| 外部能力 | Dify、支付宝、阿里云短信、百度地图 |
+| 层级     | 技术                                                           |
+| ------ | ------------------------------------------------------------ |
+| 前端     | Vue 3、TypeScript、Vite、Pinia、Vue Router、Axios、ECharts、TinyMCE |
+| 后端     | Python 3.11、FastAPI、SQLAlchemy、Pydantic、JWT、bcrypt           |
+| 数据与中间件 | MySQL 8、Redis 7、Elasticsearch 8、RabbitMQ 3                   |
+| 部署     | Docker Compose、Nginx                                         |
+| 外部能力   | Dify、支付宝、阿里云短信、百度地图                                          |
 
 ## 项目结构
 
@@ -73,14 +75,14 @@ docker compose ps
 
 访问地址：
 
-| 服务 | 地址 |
-| --- | --- |
-| Web 前端 | `http://localhost:3000` |
+| 服务                | 地址                           |
+| ----------------- | ---------------------------- |
+| Web 前端            | `http://localhost:3000`      |
 | FastAPI / Swagger | `http://localhost:8000/docs` |
-| MySQL | `localhost:3307` |
-| Redis | `localhost:6379` |
-| Elasticsearch | `http://localhost:9200` |
-| RabbitMQ 管理台 | `http://localhost:15672` |
+| MySQL             | `localhost:3307`             |
+| Redis             | `localhost:6379`             |
+| Elasticsearch     | `http://localhost:9200`      |
+| RabbitMQ 管理台      | `http://localhost:15672`     |
 
 查看日志或停止服务：
 
@@ -103,19 +105,19 @@ docker compose exec backend python create_admin.py
 
 `.env.example` 是唯一可提交的配置模板；`.env` 仅保存在本地或通过部署平台的密钥管理功能注入。
 
-| 分类 | 变量 | 是否必填 | 说明 |
-| --- | --- | --- | --- |
-| MySQL | `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME` | 是 | Docker 默认主机名为 `mysql`；`DB_PASSWORD` 必须自行设置。 |
-| Redis | `REDIS_HOST`、`REDIS_PORT` | 是 | Docker 默认主机名为 `redis`。 |
-| Elasticsearch | `ES_HOST`、`ES_URL` | 是 | Docker 默认主机名为 `elasticsearch`。 |
-| RabbitMQ | `RABBITMQ_HOST`、`RABBITMQ_PORT`、`RABBITMQ_USER`、`RABBITMQ_PASSWORD` | 是 | Docker 默认主机名为 `rabbitmq`；账号和密码不得使用示例或默认值。 |
-| JWT | `JWT_SECRET_KEY`、`JWT_EXPIRE_MINUTES`、`REFRESH_TOKEN_EXPIRE_DAYS` | 是 | `JWT_SECRET_KEY` 至少使用 32 字节随机值；泄漏后必须立即轮换。 |
-| 管理与跨域 | `ADMIN_INVITE_CODE`、`CORS_ORIGINS`、`DEBUG` | 是 | `CORS_ORIGINS` 用英文逗号分隔；生产环境只允许实际前端域名，`DEBUG=false`。 |
-| Dify | `DIFY_CREATIVE_API_KEY`、`DIFY_RISK_API_KEY`、`DIFY_API_URL` | 使用 AI 时 | 分别配置创作和风控工作流密钥。 |
-| 阿里云短信 | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`SMS_TEMPLATE_LOGIN`、`SMS_TEMPLATE_CHANGE` | 使用短信时 | 请使用最小权限的 RAM 凭据，并限制短信服务权限。 |
-| 百度地图 | `BAIDU_MAP_AK` | 使用地理编码时 | 为密钥配置来源域名/IP 限制。 |
-| 支付 | `ALIPAY_APP_ID`、`ALIPAY_GATEWAY`、`ALIPAY_REDIRECT_URI`、`ALIPAY_NOTIFY_URL` | 使用支付时 | 回调地址在生产环境必须使用 HTTPS。 |
-| 订单 | `PAYMENT_WINDOW_MINUTES` | 否 | 未支付订单的超时分钟数，默认 15。 |
+| 分类            | 变量                                                                                                         | 是否必填    | 说明                                                  |
+| ------------- | ---------------------------------------------------------------------------------------------------------- | ------- | --------------------------------------------------- |
+| MySQL         | `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`                                                      | 是       | Docker 默认主机名为 `mysql`；`DB_PASSWORD` 必须自行设置。         |
+| Redis         | `REDIS_HOST`、`REDIS_PORT`                                                                                  | 是       | Docker 默认主机名为 `redis`。                              |
+| Elasticsearch | `ES_HOST`、`ES_URL`                                                                                         | 是       | Docker 默认主机名为 `elasticsearch`。                      |
+| RabbitMQ      | `RABBITMQ_HOST`、`RABBITMQ_PORT`、`RABBITMQ_USER`、`RABBITMQ_PASSWORD`                                        | 是       | Docker 默认主机名为 `rabbitmq`；账号和密码不得使用示例或默认值。           |
+| JWT           | `JWT_SECRET_KEY`、`JWT_EXPIRE_MINUTES`、`REFRESH_TOKEN_EXPIRE_DAYS`                                          | 是       | `JWT_SECRET_KEY` 至少使用 32 字节随机值；泄漏后必须立即轮换。           |
+| 管理与跨域         | `ADMIN_INVITE_CODE`、`CORS_ORIGINS`、`DEBUG`                                                                 | 是       | `CORS_ORIGINS` 用英文逗号分隔；生产环境只允许实际前端域名，`DEBUG=false`。 |
+| Dify          | `DIFY_CREATIVE_API_KEY`、`DIFY_RISK_API_KEY`、`DIFY_API_URL`                                                 | 使用 AI 时 | 分别配置创作和风控工作流密钥。                                     |
+| 阿里云短信         | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`SMS_TEMPLATE_LOGIN`、`SMS_TEMPLATE_CHANGE` | 使用短信时   | 请使用最小权限的 RAM 凭据，并限制短信服务权限。                          |
+| 百度地图          | `BAIDU_MAP_AK`                                                                                             | 使用地理编码时 | 为密钥配置来源域名/IP 限制。                                    |
+| 支付            | `ALIPAY_APP_ID`、`ALIPAY_GATEWAY`、`ALIPAY_REDIRECT_URI`、`ALIPAY_NOTIFY_URL`                                 | 使用支付时   | 回调地址在生产环境必须使用 HTTPS。                                |
+| 订单            | `PAYMENT_WINDOW_MINUTES`                                                                                   | 否       | 未支付订单的超时分钟数，默认 15。                                  |
 
 ## 配置支付宝（可选）
 
