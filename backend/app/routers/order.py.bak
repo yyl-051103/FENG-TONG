@@ -1,0 +1,412 @@
+"""
+订单路由 - 用户下单 / 订单列表 / 订单详情 / 管理端订单管理 / 抢购排队结果轮询
+"""
+import os
+import json
+import random
+import time
+import logging
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from typing import Optional
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
+
+from app.dependencies import get_db, get_current_user
+from app.models.user import User
+from app.models.gift import Gift
+from app.models.order import Order, OrderItem
+from app.models.flash_sale import FlashSale
+from app.models.score import ScoreRecord, ScoreType, ScoreSource
+from app.utils.redis_client import redis_client
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/orders", tags=["订单"])
+
+
+class CreateOrderRequest(BaseModel):
+    gift_id: int
+    quantity: int = 1
+    flash_sale_id: Optional[int] = None  # 抢购模式
+    use_points: Optional[bool] = True  # 是否使用积分抵扣，默认 True
+
+
+@router.post("")
+def create_order(
+    body: CreateOrderRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """创建订单：支持普通兑换/购买 + 抢购模式（发布到 RabbitMQ 排队）"""
+
+    real_user = db.query(User).filter(User.id == current_user.id).first()
+    if not real_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    # ── 抢购模式：发布到 RabbitMQ order.queue ──
+    if body.flash_sale_id:
+        fs = db.query(FlashSale).filter(FlashSale.id == body.flash_sale_id).first()
+        if not fs:
+            raise HTTPException(status_code=404, detail="抢购活动不存在")
+
+        now = datetime.now()
+        if now < fs.start_time:
+            raise HTTPException(status_code=400, detail="抢购尚未开始")
+        if now > fs.end_time:
+            raise HTTPException(status_code=400, detail="抢购已结束")
+        if fs.status == "已结束":
+            raise HTTPException(status_code=400, detail="抢购已结束")
+
+        # 快速检查 Redis 库存
+        redis_stock = redis_client.get(f"flash:stock:{body.flash_sale_id}")
+        if redis_stock is not None and int(redis_stock) < body.quantity:
+            raise HTTPException(status_code=400, detail="抢购库存不足")
+
+        # 发布消息到 order.queue
+        import pika
+        from app.config import RABBITMQ_URL
+
+        message = {
+            "user_id": real_user.id,
+            "gift_id": fs.gift_id,
+            "flash_sale_id": body.flash_sale_id,
+            "quantity": body.quantity,
+        }
+
+        try:
+            params = pika.URLParameters(RABBITMQ_URL)
+            connection = pika.BlockingConnection(params)
+            channel = connection.channel()
+            channel.queue_declare(queue="order.queue", durable=True, exclusive=False)
+            channel.basic_publish(
+                exchange="",
+                routing_key="order.queue",
+                body=json.dumps(message),
+                properties=pika.BasicProperties(delivery_mode=2),
+            )
+            connection.close()
+            logger.info(f"[Order] 抢购消息已发布: user={real_user.id}, flash_sale={body.flash_sale_id}")
+        except Exception as e:
+            logger.error(f"[Order] RabbitMQ 发布失败: {e}")
+            raise HTTPException(status_code=500, detail="排队服务暂时不可用，请稍后重试")
+
+        return {"code": 200, "data": {"status": "queuing"}, "message": "已进入抢购队列，请等待结果"}
+
+    # ── 普通下单模式（同步） ──
+    gift = db.query(Gift).filter(Gift.id == body.gift_id, Gift.status == "上架").first()
+    if not gift:
+        raise HTTPException(status_code=404, detail="礼品不存在或已下架")
+    if gift.stock < body.quantity:
+        raise HTTPException(status_code=400, detail=f"「{gift.name}」库存不足，剩余 {gift.stock} 件")
+
+    points_needed = (gift.points_required or 0) * body.quantity
+    total_price = float(gift.price or 0) * body.quantity
+
+    user_balance = real_user.score_balance or 0
+    use_points = body.use_points and (user_balance >= points_needed)
+
+    ts = str(int(time.time() * 1000))
+    rand_suffix = str(random.randint(1000, 9999))
+    order_no = f"GIFT{ts}{rand_suffix}"
+
+    if use_points:
+        real_user.score_balance = user_balance - points_needed
+        total_points = points_needed
+        order_total_price = 0.00
+        score_record = ScoreRecord(
+            user_id=real_user.id,
+            type=ScoreType.consume,
+            source=ScoreSource.gift_exchange,
+            score=-points_needed,
+            balance_after=real_user.score_balance,
+            description=f"兑换礼品，订单号 {order_no}",
+            create_time=datetime.now(),
+        )
+        db.add(score_record)
+    else:
+        total_points = 0
+        order_total_price = total_price
+
+    order = Order(
+        order_no=order_no,
+        user_id=real_user.id,
+        total_points=total_points,
+        total_price=order_total_price,
+        status="待支付",
+        expire_time=datetime.now() + timedelta(minutes=int(os.getenv("PAYMENT_WINDOW_MINUTES", "15"))),
+    )
+    db.add(order)
+    db.flush()
+
+    gift.stock -= body.quantity
+
+    order_item = OrderItem(
+        order_id=order.id,
+        gift_id=gift.id,
+        quantity=body.quantity,
+        points_per_item=gift.points_required or 0,
+        price_per_item=float(gift.price or 0),
+    )
+    db.add(order_item)
+
+    db.commit()
+    db.refresh(order)
+
+    # 注册支付超时
+    payment_window = int(os.getenv("PAYMENT_WINDOW_MINUTES", "15"))
+    redis_client.zadd("order:timeout", {order.order_no: int(time.time()) + payment_window * 60})
+
+    return {
+        "code": 200,
+        "data": {
+            "id": order.id,
+            "order_no": order.order_no,
+            "total_points": order.total_points,
+            "total_price": float(order.total_price) if order.total_price else 0.00,
+            "status": order.status,
+            "use_points": use_points,
+        },
+        "message": "下单成功" if use_points else "下单成功，积分不足已自动切换为现金支付",
+    }
+
+
+@router.get("/result")
+def get_order_result(
+    current_user: User = Depends(get_current_user),
+):
+    """前端轮询：从 Redis 取抢购排队结果"""
+    result_key = f"order:result:{current_user.id}"
+    raw = redis_client.get(result_key)
+    if raw is None:
+        return {"code": 200, "data": {"status": "queuing"}}
+
+    result = json.loads(raw)
+    return {"code": 200, "data": result}
+
+
+@router.get("")
+def list_orders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """当前用户的订单列表"""
+    orders = (
+        db.query(Order)
+        .filter(Order.user_id == current_user.id)
+        .order_by(Order.create_time.desc())
+        .all()
+    )
+
+    items = []
+    for o in orders:
+        order_items = db.query(OrderItem).filter(OrderItem.order_id == o.id).all()
+        item_details = []
+        for oi in order_items:
+            gift = db.query(Gift).filter(Gift.id == oi.gift_id).first()
+            item_details.append({
+                "gift_name": gift.name if gift else "已删除礼品",
+                "quantity": oi.quantity,
+                "points_per_item": oi.points_per_item,
+                "price_per_item": float(oi.price_per_item) if oi.price_per_item else 0.00,
+            })
+
+        items.append({
+            "id": o.id,
+            "order_no": o.order_no,
+            "total_points": o.total_points,
+            "total_price": float(o.total_price) if o.total_price else 0.00,
+            "status": o.status,
+            "create_time": o.create_time.isoformat() if o.create_time else None,
+            "items": item_details,
+        })
+
+    return {"code": 200, "data": {"items": items}}
+
+
+@router.get("/{order_id}")
+def get_order_detail(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """订单详情"""
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+    if order.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权查看该订单")
+
+    order_items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
+    item_details = []
+    for oi in order_items:
+        gift = db.query(Gift).filter(Gift.id == oi.gift_id).first()
+        item_details.append({
+            "gift_id": oi.gift_id,
+            "gift_name": gift.name if gift else "已删除礼品",
+            "quantity": oi.quantity,
+            "points_per_item": oi.points_per_item,
+            "price_per_item": float(oi.price_per_item) if oi.price_per_item else 0.00,
+        })
+
+    return {
+        "code": 200,
+        "data": {
+            "id": order.id,
+            "order_no": order.order_no,
+            "total_points": order.total_points,
+            "total_price": float(order.total_price) if order.total_price else 0.00,
+            "status": order.status,
+            "create_time": order.create_time.isoformat() if order.create_time else None,
+            "items": item_details,
+        },
+    }
+
+
+# ── 管理端 ──
+
+@router.get("/admin/all")
+def admin_list_orders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """管理端：全部订单列表"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权限")
+
+    orders = db.query(Order).order_by(Order.create_time.desc()).all()
+
+    items = []
+    for o in orders:
+        user_obj = db.query(User).filter(User.id == o.user_id).first()
+        order_items = db.query(OrderItem).filter(OrderItem.order_id == o.id).all()
+        item_details = []
+        for oi in order_items:
+            gift = db.query(Gift).filter(Gift.id == oi.gift_id).first()
+            item_details.append({
+                "gift_name": gift.name if gift else "已删除礼品",
+                "quantity": oi.quantity,
+            })
+
+        items.append({
+            "id": o.id,
+            "order_no": o.order_no,
+            "user_id": o.user_id,
+            "username": user_obj.username if user_obj else "未知",
+            "nickname": user_obj.nickname if user_obj else "未知",
+            "total_points": o.total_points,
+            "total_price": float(o.total_price) if o.total_price else 0.00,
+            "status": o.status,
+            "create_time": o.create_time.isoformat() if o.create_time else None,
+            "items": item_details,
+        })
+
+    return {"code": 200, "data": {"items": items}}
+
+
+@router.put("/{order_id}/cancel")
+def cancel_order(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """取消订单：恢复库存、退还积分"""
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+
+    # 权限：订单所属用户 或 管理员
+    if order.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权操作该订单")
+
+    if order.status != "待支付":
+        raise HTTPException(status_code=400, detail=f"订单状态为「{order.status}」，不可取消")
+
+    # 更新状态
+    order.status = "已取消"
+
+    # 恢复库存
+    order_items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
+    for oi in order_items:
+        gift = db.query(Gift).filter(Gift.id == oi.gift_id).first()
+        if gift:
+            gift.stock += oi.quantity
+
+            # 同步恢复 Redis 抢购库存（找到同礼品未结束的抢购活动）
+            flash_sales = db.query(FlashSale).filter(
+                FlashSale.gift_id == gift.id,
+                FlashSale.status != "已结束"
+            ).all()
+            for fs in flash_sales:
+                redis_key = f"flash:stock:{fs.id}"
+                redis_client.incrby(redis_key, oi.quantity)
+
+    # 退还积分
+    if order.total_points and order.total_points > 0:
+        real_user = db.query(User).filter(User.id == order.user_id).first()
+        if real_user:
+            real_user.score_balance = (real_user.score_balance or 0) + order.total_points
+            score_record = ScoreRecord(
+                user_id=real_user.id,
+                type=ScoreType.earn,
+                source=ScoreSource.refund,
+                score=order.total_points,
+                balance_after=real_user.score_balance,
+                description=f"取消订单退还积分，订单号 {order.order_no}",
+                create_time=datetime.now(),
+            )
+            db.add(score_record)
+
+    # 移除超时注册
+    redis_client.zrem("order:timeout", order.order_no)
+
+    db.commit()
+
+    return {"code": 200, "message": "订单已取消，库存和积分已恢复"}
+
+
+@router.delete("/{order_id}")
+def delete_order(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """删除订单：删除订单及其关联的 OrderItem"""
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+
+    if order.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权操作该订单")
+
+    # 删除关联的 order_item
+    db.query(OrderItem).filter(OrderItem.order_id == order_id).delete()
+    # 删除订单
+    db.delete(order)
+    db.commit()
+
+    return {"code": 200, "message": "订单已删除"}
+
+
+class UpdateOrderStatus(BaseModel):
+    status: str
+
+
+@router.put("/admin/{order_id}/status")
+def update_order_status(
+    order_id: int,
+    body: UpdateOrderStatus,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """管理端：更新订单状态"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权限")
+
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+
+    order.status = body.status
+    db.commit()
+    return {"code": 200, "message": "状态更新成功"}

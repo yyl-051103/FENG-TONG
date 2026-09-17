@@ -1,0 +1,125 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: fengtong-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MYSQL_DATABASE: ${DB_NAME:?Set DB_NAME in .env}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: fengtong-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: fengtong-es
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms256m -Xmx256m"
+      - http.cors.enabled=true
+      - 'http.cors.allow-origin="*"'
+      - 'http.cors.allow-methods=OPTIONS,HEAD,GET,POST,PUT,DELETE'
+      - 'http.cors.allow-headers=X-Requested-With,Content-Type,Content-Length,Authorization'
+      - http.cors.allow-credentials=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: fengtong-rabbitmq
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fengtong-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
+      - ALIPAY_APP_ID=${ALIPAY_APP_ID}
+      - ALIPAY_GATEWAY=${ALIPAY_GATEWAY}
+      - ALIPAY_REDIRECT_URI=${ALIPAY_REDIRECT_URI}
+      - ALIPAY_NOTIFY_URL=${ALIPAY_NOTIFY_URL}
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      elasticsearch:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+
+  backend_consumer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fengtong-backend-consumer
+    restart: always
+    command: python -m app.services.order_consumer
+    environment:
+      - TZ=Asia/Shanghai
+      - ALIPAY_APP_ID=${ALIPAY_APP_ID}
+      - ALIPAY_GATEWAY=${ALIPAY_GATEWAY}
+      - ALIPAY_REDIRECT_URI=${ALIPAY_REDIRECT_URI}
+      - ALIPAY_NOTIFY_URL=${ALIPAY_NOTIFY_URL}
+    env_file:
+      - .env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: fengtong-frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+  redis_data:
+  es_data:
+  rabbitmq_data:

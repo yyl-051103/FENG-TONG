@@ -1,0 +1,18 @@
+# Optional Compose override for Alipay. Copy to docker-compose.alipay.yml after
+# placing your own PEM files under secrets/. Do not commit the copied file or PEMs.
+services:
+  backend:
+    volumes:
+      - ./secrets/alipay_private_key.pem:/app/keys/alipay_private_key.pem:ro
+      - ./secrets/alipay_public_key.pem:/app/keys/alipay_public_key.pem:ro
+    environment:
+      ALIPAY_PRIVATE_KEY_PATH: /app/keys/alipay_private_key.pem
+      ALIPAY_PUBLIC_KEY_PATH: /app/keys/alipay_public_key.pem
+
+  backend_consumer:
+    volumes:
+      - ./secrets/alipay_private_key.pem:/app/keys/alipay_private_key.pem:ro
+      - ./secrets/alipay_public_key.pem:/app/keys/alipay_public_key.pem:ro
+    environment:
+      ALIPAY_PRIVATE_KEY_PATH: /app/keys/alipay_private_key.pem
+      ALIPAY_PUBLIC_KEY_PATH: /app/keys/alipay_public_key.pem
